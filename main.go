@@ -79,11 +79,13 @@ func NewMITMHandler(config Config) *MITMHandler {
 	}
 }
 
-// Request - Intercepte les requêtes entrantes
-func (h *MITMHandler) Request(f *mitmproxy.Flow) {
+// HandleRequest - Intercepte les requêtes entrantes
+func (h *MITMHandler) HandleRequest(ctx *proxy.Context) {
+	req := ctx.Req
+
 	// Vérifier si la route doit être exclue
 	for _, route := range h.config.ExcludedRoutes {
-		if strings.Contains(f.Request.URL.Path, route) {
+		if strings.Contains(req.URL.Path, route) {
 			return
 		}
 	}
@@ -95,19 +97,19 @@ func (h *MITMHandler) Request(f *mitmproxy.Flow) {
 	requestID := uuid.New().String()
 
 	// Extraire les informations de la requête
-	clientName := f.Request.Header.Get("client-name")
+	clientName := req.Header.Get("client-name")
 	if clientName == "" {
 		clientName = "Anonyme"
 	}
 
-	correlationID := f.Request.Header.Get("correlation-id")
+	correlationID := req.Header.Get("correlation-id")
 	if correlationID == "" {
 		correlationID = requestID
 	}
 
-	user := f.Request.Header.Get("username")
+	user := req.Header.Get("username")
 	if user == "" {
-		user = f.Request.Header.Get("user")
+		user = req.Header.Get("user")
 	}
 	if user == "" {
 		user = "Anonyme"
@@ -115,7 +117,7 @@ func (h *MITMHandler) Request(f *mitmproxy.Flow) {
 
 	// Créer une map pour les en-têtes HTTP
 	headers := make(map[string]string)
-	for name, values := range f.Request.Header {
+	for name, values := range req.Header {
 		// Masquer les en-têtes sensibles
 		headerLower := strings.ToLower(name)
 		for _, mask := range h.config.MaskHeaders {
@@ -127,15 +129,13 @@ func (h *MITMHandler) Request(f *mitmproxy.Flow) {
 		headers[name] = strings.Join(values, ", ")
 	}
 
-	// Lire le corps de la requête sans le modifier
-	bodyBytes, err := io.ReadAll(f.Request.Body)
-	if err != nil {
-		log.Printf("Erreur lors de la lecture du corps de la requête: %v", err)
-		return
+	// Lire le corps de la requête
+	var bodyBytes []byte
+	if req.Body != nil {
+		bodyBytes, _ = io.ReadAll(req.Body)
+		// Remettre le corps dans la requête
+		req.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 	}
-
-	// Remettre le corps dans la requête pour ne pas interférer avec le flux
-	f.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 
 	// Créer l'entrée de journal initiale
 	logEntry := &LogModel{
@@ -144,63 +144,72 @@ func (h *MITMHandler) Request(f *mitmproxy.Flow) {
 		ClientName:    clientName,
 		User:          user,
 		OccuredTime:   time.Now(),
-		HTTPMethod:    f.Request.Method,
-		HTTPUrl:       f.Request.URL.String(),
+		HTTPMethod:    req.Method,
+		HTTPUrl:       req.URL.String(),
 		HTTPHeaders:   headers,
 		HTTPBody:      string(bodyBytes),
 		LogTextShort:  "Requête interceptée",
-		LogText:       fmt.Sprintf("Requête interceptée: %s %s", f.Request.Method, f.Request.URL.String()),
+		LogText:       fmt.Sprintf("Requête interceptée: %s %s", req.Method, req.URL.String()),
 		LogType:       "info",
 	}
 
 	// Envoyer le journal initial au service de journalisation
 	go h.sendLogToLogger(logEntry, "create")
 
-	// Configurer un gestionnaire pour la réponse
-	f.OnResponse(func() {
-		// Lire le corps de la réponse sans le modifier
-		responseBodyBytes, err := io.ReadAll(f.Response.Body)
-		if err != nil {
-			log.Printf("Erreur lors de la lecture du corps de la réponse: %v", err)
-			return
-		}
-
-		// Remettre le corps dans la réponse
-		f.Response.Body = io.NopCloser(bytes.NewBuffer(responseBodyBytes))
-
-		// Mettre à jour le journal avec les données de réponse
-		executionTime := time.Since(startTime).Milliseconds()
-
-		logEntry.HTTPReturnCode = f.Response.StatusCode
-		logEntry.HTTPReturnBody = string(responseBodyBytes)
-		logEntry.ExecutionTime = executionTime
-
-		// Mettre à jour le texte du journal en fonction du code d'état
-		if f.Response.StatusCode >= 400 {
-			logEntry.LogTextShort = fmt.Sprintf("Erreur: %d", f.Response.StatusCode)
-			logEntry.LogText = fmt.Sprintf("La requête a échoué avec le code d'état %d: %s %s",
-				f.Response.StatusCode, logEntry.HTTPMethod, logEntry.HTTPUrl)
-
-			if f.Response.StatusCode >= 500 {
-				logEntry.LogType = "critical"
-			} else {
-				logEntry.LogType = "error"
-			}
-		} else {
-			logEntry.LogTextShort = fmt.Sprintf("Succès: %d", f.Response.StatusCode)
-			logEntry.LogText = fmt.Sprintf("La requête s'est terminée avec succès avec le code d'état %d: %s %s",
-				f.Response.StatusCode, logEntry.HTTPMethod, logEntry.HTTPUrl)
-			logEntry.LogType = "info"
-		}
-
-		// Envoyer le journal mis à jour au service de journalisation
-		go h.sendLogToLogger(logEntry, "update")
-	})
+	// Stocker les données dans le contexte pour les récupérer dans HandleResponse
+	ctx.Set("logEntry", logEntry)
+	ctx.Set("startTime", startTime)
 }
 
-// Response - Intercepte les réponses (non utilisé car nous utilisons OnResponse dans Request)
-func (h *MITMHandler) Response(f *mitmproxy.Flow) {
-	// Nous utilisons OnResponse dans la méthode Request
+// HandleResponse - Intercepte les réponses
+func (h *MITMHandler) HandleResponse(ctx *proxy.Context) {
+	// Récupérer les données du contexte
+	logEntryInterface := ctx.Get("logEntry")
+	startTimeInterface := ctx.Get("startTime")
+
+	if logEntryInterface == nil || startTimeInterface == nil {
+		return
+	}
+
+	logEntry := logEntryInterface.(*LogModel)
+	startTime := startTimeInterface.(time.Time)
+	resp := ctx.Resp
+
+	// Lire le corps de la réponse
+	var responseBodyBytes []byte
+	if resp.Body != nil {
+		responseBodyBytes, _ = io.ReadAll(resp.Body)
+		// Remettre le corps dans la réponse
+		resp.Body = io.NopCloser(bytes.NewBuffer(responseBodyBytes))
+	}
+
+	// Mettre à jour le journal avec les données de réponse
+	executionTime := time.Since(startTime).Milliseconds()
+
+	logEntry.HTTPReturnCode = resp.StatusCode
+	logEntry.HTTPReturnBody = string(responseBodyBytes)
+	logEntry.ExecutionTime = executionTime
+
+	// Mettre à jour le texte du journal en fonction du code d'état
+	if resp.StatusCode >= 400 {
+		logEntry.LogTextShort = fmt.Sprintf("Erreur: %d", resp.StatusCode)
+		logEntry.LogText = fmt.Sprintf("La requête a échoué avec le code d'état %d: %s %s",
+			resp.StatusCode, logEntry.HTTPMethod, logEntry.HTTPUrl)
+
+		if resp.StatusCode >= 500 {
+			logEntry.LogType = "critical"
+		} else {
+			logEntry.LogType = "error"
+		}
+	} else {
+		logEntry.LogTextShort = fmt.Sprintf("Succès: %d", resp.StatusCode)
+		logEntry.LogText = fmt.Sprintf("La requête s'est terminée avec succès avec le code d'état %d: %s %s",
+			resp.StatusCode, logEntry.HTTPMethod, logEntry.HTTPUrl)
+		logEntry.LogType = "info"
+	}
+
+	// Envoyer le journal mis à jour au service de journalisation
+	go h.sendLogToLogger(logEntry, "update")
 }
 
 // sendLogToLogger - Envoyer une entrée de journal au service de journalisation
@@ -285,32 +294,43 @@ func main() {
 	handler := NewMITMHandler(config)
 
 	// Configurer les options du proxy
-	opts := proxy.Options{
+	opts := &proxy.Options{
 		Addr:              getEnv("LISTEN_ADDR", ":8080"),
 		StreamLargeBodies: 1024 * 1024 * 5, // 5 MB
 	}
 
+	// Créer le proxy
+	p, err := proxy.NewProxy(opts)
+	if err != nil {
+		log.Fatalf("Erreur lors de la création du proxy MITM: %v", err)
+	}
+
+	// Ajouter notre gestionnaire personnalisé
+	p.AddAddon(handler)
+
 	// Configurer l'interface web si activée
 	if webInterface {
-		webOpts := web.Options{
+		webOpts := &web.Options{
 			Addr: fmt.Sprintf(":%d", webPort),
 		}
 
 		log.Printf("Démarrage du proxy MITM avec interface web sur :%d", webPort)
 		log.Printf("Point de terminaison du logger: %s", loggerEndpoint)
 
-		// Démarrer le proxy avec l'interface web
-		if err := mitmproxy.StartWithWeb(handler, opts, webOpts); err != nil {
-			log.Fatalf("Erreur lors du démarrage du proxy MITM: %v", err)
+		// Démarrer l'interface web
+		webServer, err := web.NewWebAddOn(webOpts)
+		if err != nil {
+			log.Fatalf("Erreur lors de la création de l'interface web: %v", err)
 		}
+		p.AddAddon(webServer)
 	} else {
 		log.Printf("Démarrage du proxy MITM sur %s", opts.Addr)
 		log.Printf("Point de terminaison du logger: %s", loggerEndpoint)
+	}
 
-		// Démarrer le proxy sans interface web
-		if err := mitmproxy.Start(handler, opts); err != nil {
-			log.Fatalf("Erreur lors du démarrage du proxy MITM: %v", err)
-		}
+	// Démarrer le proxy
+	if err := p.Start(); err != nil {
+		log.Fatalf("Erreur lors du démarrage du proxy MITM: %v", err)
 	}
 }
 
