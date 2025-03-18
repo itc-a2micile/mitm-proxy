@@ -1,0 +1,30 @@
+{
+    "mappings": [
+      {
+        "request": {
+          "method": "POST",
+          "url": "/api/logs"
+        },
+        "response": {
+          "status": 201,
+          "headers": {
+            "Content-Type": "application/json"
+          },
+          "body": "{\"status\":\"created\",\"message\":\"Log entry created successfully\"}"
+        }
+      },
+      {
+        "request": {
+          "method": "POST",
+          "url": "/api/logs/update"
+        },
+        "response": {
+          "status": 200,
+          "headers": {
+            "Content-Type": "application/json"
+          },
+          "body": "{\"status\":\"updated\",\"message\":\"Log entry updated successfully\"}"
+        }
+      }
+    ]
+  }

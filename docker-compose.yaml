@@ -1,0 +1,37 @@
+version: '3.8'
+
+services:
+  mitm-proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"  # Port du proxy
+      - "8081:8081"  # Port de l'interface web
+    environment:
+      - LISTEN_ADDR=:8080
+      - LOGGER_ENDPOINT=http://logger-service:8080/api/logs
+      - EXCLUDED_ROUTES=health,metrics
+      - MASK_HEADERS=authorization,password,token,api-key
+      - WEB_INTERFACE=true
+      - WEB_PORT=8081
+      - MAX_RETRIES=3
+      - RETRY_DELAY=500ms
+    volumes:
+      - ./certs:/app/certs
+    networks:
+      - app-network
+
+  # Mock logger service for testing
+  logger-service:
+    image: wiremock/wiremock:latest
+    ports:
+      - "8082:8080"
+    volumes:
+      - ./wiremock:/home/wiremock
+    networks:
+      - app-network
+
+networks:
+  app-network:
+    driver: bridge
