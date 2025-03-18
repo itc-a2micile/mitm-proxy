@@ -12,9 +12,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/mitmproxy/go-mitmproxy"
-	"github.com/mitmproxy/go-mitmproxy/proxy"
-	"github.com/mitmproxy/go-mitmproxy/web"
+	"github.com/lqqyt2423/go-mitmproxy/proxy"
+	"github.com/lqqyt2423/go-mitmproxy/web"
 )
 
 // LogModel - Structure pour la journalisation des requêtes et réponses

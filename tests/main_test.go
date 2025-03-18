@@ -7,8 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mitmproxy/go-mitmproxy"
-	"github.com/mitmproxy/go-mitmproxy/proxy"
+	"github.com/lqqyt2423/go-mitmproxy/proxy"
 	"github.com/stretchr/testify/assert"
 )
 
