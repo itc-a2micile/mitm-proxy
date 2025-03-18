@@ -7,7 +7,7 @@ toolchain go1.24.1
 require (
 	github.com/google/uuid v1.3.0
 	github.com/lqqyt2423/go-mitmproxy v1.8.5
-	github.com/stretchr/testify v1.3.0
+	github.com/stretchr/testify v1.10.0
 )
 
 require (
@@ -24,4 +24,5 @@ require (
 	golang.org/x/net v0.22.0 // indirect
 	golang.org/x/sys v0.18.0 // indirect
 	golang.org/x/text v0.14.0 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
