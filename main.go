@@ -13,7 +13,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/lqqyt2423/go-mitmproxy/proxy"
-	"github.com/lqqyt2423/go-mitmproxy/web"
 )
 
 // LogModel - Structure pour la journalisation des requêtes et réponses
@@ -50,6 +49,7 @@ type Config struct {
 type MITMHandler struct {
 	config     Config
 	httpClient *http.Client
+	flowData   map[string]*LogModel
 }
 
 // NewMITMHandler - Créer un nouveau gestionnaire MITM avec la configuration donnée
@@ -76,16 +76,17 @@ func NewMITMHandler(config Config) *MITMHandler {
 	return &MITMHandler{
 		config:     config,
 		httpClient: httpClient,
+		flowData:   make(map[string]*LogModel),
 	}
 }
 
-// HandleRequest - Intercepte les requêtes entrantes
-func (h *MITMHandler) HandleRequest(ctx *proxy.Context) {
-	req := ctx.Req
+// Request - Intercepte les requêtes entrantes
+func (h *MITMHandler) Request(f *proxy.Flow) {
+	req := f.Request
 
 	// Vérifier si la route doit être exclue
 	for _, route := range h.config.ExcludedRoutes {
-		if strings.Contains(req.URL.Path, route) {
+		if strings.Contains(req.URL.String(), route) {
 			return
 		}
 	}
@@ -132,9 +133,7 @@ func (h *MITMHandler) HandleRequest(ctx *proxy.Context) {
 	// Lire le corps de la requête
 	var bodyBytes []byte
 	if req.Body != nil {
-		bodyBytes, _ = io.ReadAll(req.Body)
-		// Remettre le corps dans la requête
-		req.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+		bodyBytes = req.Body
 	}
 
 	// Créer l'entrée de journal initiale
@@ -156,31 +155,28 @@ func (h *MITMHandler) HandleRequest(ctx *proxy.Context) {
 	// Envoyer le journal initial au service de journalisation
 	go h.sendLogToLogger(logEntry, "create")
 
-	// Stocker les données dans le contexte pour les récupérer dans HandleResponse
-	ctx.Set("logEntry", logEntry)
-	ctx.Set("startTime", startTime)
+	// Stocker les données pour les récupérer dans Response
+	h.flowData[f.Id.String()] = logEntry
+
+	// Ecrire en console le temps d'exécution
+	log.Printf("Temps d'exécution: %d ms", time.Since(startTime).Milliseconds())
 }
 
-// HandleResponse - Intercepte les réponses
-func (h *MITMHandler) HandleResponse(ctx *proxy.Context) {
-	// Récupérer les données du contexte
-	logEntryInterface := ctx.Get("logEntry")
-	startTimeInterface := ctx.Get("startTime")
-
-	if logEntryInterface == nil || startTimeInterface == nil {
+// Response - Intercepte les réponses
+func (h *MITMHandler) Response(f *proxy.Flow) {
+	// Récupérer les données stockées
+	logEntry, ok := h.flowData[f.Id.String()]
+	if !ok {
 		return
 	}
 
-	logEntry := logEntryInterface.(*LogModel)
-	startTime := startTimeInterface.(time.Time)
-	resp := ctx.Resp
+	resp := f.Response
+	startTime := logEntry.OccuredTime
 
 	// Lire le corps de la réponse
 	var responseBodyBytes []byte
 	if resp.Body != nil {
-		responseBodyBytes, _ = io.ReadAll(resp.Body)
-		// Remettre le corps dans la réponse
-		resp.Body = io.NopCloser(bytes.NewBuffer(responseBodyBytes))
+		responseBodyBytes = resp.Body
 	}
 
 	// Mettre à jour le journal avec les données de réponse
@@ -201,16 +197,39 @@ func (h *MITMHandler) HandleResponse(ctx *proxy.Context) {
 		} else {
 			logEntry.LogType = "error"
 		}
-	} else {
-		logEntry.LogTextShort = fmt.Sprintf("Succès: %d", resp.StatusCode)
-		logEntry.LogText = fmt.Sprintf("La requête s'est terminée avec succès avec le code d'état %d: %s %s",
-			resp.StatusCode, logEntry.HTTPMethod, logEntry.HTTPUrl)
-		logEntry.LogType = "info"
 	}
 
 	// Envoyer le journal mis à jour au service de journalisation
 	go h.sendLogToLogger(logEntry, "update")
+
+	// Nettoyer les données stockées
+	delete(h.flowData, f.Id.String())
 }
+
+// Done - Appelé lorsque le flux est terminé
+func (h *MITMHandler) Done(f *proxy.Flow) {
+	// Nettoyer les données stockées si ce n'est pas déjà fait
+	delete(h.flowData, f.Id.String())
+}
+
+// Requis par l'interface proxy.Addon
+func (h *MITMHandler) ResponseHeader(f *proxy.Flow)                                 {}
+func (h *MITMHandler) RequestHeader(f *proxy.Flow)                                  {}
+func (h *MITMHandler) Connect(f *proxy.Flow)                                        {}
+func (h *MITMHandler) Connected(f *proxy.Flow)                                      {}
+func (h *MITMHandler) Error(f *proxy.Flow)                                          {}
+func (h *MITMHandler) HTTPError(f *proxy.Flow)                                      {}
+func (h *MITMHandler) ParentProxy(*proxy.Flow) string                               { return "" }
+func (h *MITMHandler) AccessProxyServer(req *http.Request, res http.ResponseWriter) {}
+func (h *MITMHandler) StreamRequestModifier(f *proxy.Flow, in io.Reader) io.Reader  { return in }
+func (h *MITMHandler) StreamResponseModifier(f *proxy.Flow, in io.Reader) io.Reader { return in }
+func (h *MITMHandler) ClientConnected(client *proxy.ClientConn)                     {}
+func (h *MITMHandler) ClientDisconnected(client *proxy.ClientConn)                  {}
+func (h *MITMHandler) ServerConnected(ctx *proxy.ConnContext)                       {}
+func (h *MITMHandler) ServerDisconnected(ctx *proxy.ConnContext)                    {}
+func (h *MITMHandler) TlsEstablishedServer(ctx *proxy.ConnContext)                  {}
+func (h *MITMHandler) Requestheaders(f *proxy.Flow)                                 {}
+func (h *MITMHandler) Responseheaders(f *proxy.Flow)                                {}
 
 // sendLogToLogger - Envoyer une entrée de journal au service de journalisation
 func (h *MITMHandler) sendLogToLogger(logEntry *LogModel, action string) {
@@ -261,33 +280,15 @@ func (h *MITMHandler) sendLogToLogger(logEntry *LogModel, action string) {
 }
 
 func main() {
-	// Obtenir la configuration à partir des variables d'environnement ou utiliser les valeurs par défaut
-	loggerEndpoint := getEnv("LOGGER_ENDPOINT", "http://logger-service/api/logs")
-	maxRetries := getEnvInt("MAX_RETRIES", 3)
-	retryDelay := getEnvDuration("RETRY_DELAY", 500*time.Millisecond)
-	webInterface := getEnvBool("WEB_INTERFACE", true)
-	webPort := getEnvInt("WEB_PORT", 8081)
-
-	// Analyser les routes exclues
-	excludedRoutesStr := getEnv("EXCLUDED_ROUTES", "")
-	var excludedRoutes []string
-	if excludedRoutesStr != "" {
-		excludedRoutes = strings.Split(excludedRoutesStr, ",")
-	}
-
-	// Analyser les en-têtes à masquer
-	maskHeadersStr := getEnv("MASK_HEADERS", "authorization,password,token,api-key")
-	maskHeaders := strings.Split(maskHeadersStr, ",")
-
-	// Créer la configuration
+	// Charger la configuration depuis les variables d'environnement
 	config := Config{
-		LoggerEndpoint: loggerEndpoint,
-		MaxRetries:     maxRetries,
-		RetryDelay:     retryDelay,
-		ExcludedRoutes: excludedRoutes,
-		MaskHeaders:    maskHeaders,
-		WebInterface:   webInterface,
-		WebPort:        webPort,
+		LoggerEndpoint: getEnv("LOGGER_ENDPOINT", "http://localhost:8080/api/logs"),
+		MaxRetries:     getEnvInt("MAX_RETRIES", 3),
+		RetryDelay:     getEnvDuration("RETRY_DELAY", 500*time.Millisecond),
+		ExcludedRoutes: strings.Split(getEnv("EXCLUDED_ROUTES", ""), ","),
+		MaskHeaders:    strings.Split(getEnv("MASK_HEADERS", "authorization,password,token,api-key"), ","),
+		WebInterface:   getEnvBool("WEB_INTERFACE", true),
+		WebPort:        getEnvInt("WEB_PORT", 8081),
 	}
 
 	// Créer le gestionnaire MITM
@@ -295,43 +296,21 @@ func main() {
 
 	// Configurer les options du proxy
 	opts := &proxy.Options{
-		Addr:              getEnv("LISTEN_ADDR", ":8080"),
-		StreamLargeBodies: 1024 * 1024 * 5, // 5 MB
+		Addr:              fmt.Sprintf(":%d", config.WebPort),
+		StreamLargeBodies: 1024 * 1024, // 1MB
 	}
 
-	// Créer le proxy
+	// Créer et démarrer le proxy
 	p, err := proxy.NewProxy(opts)
 	if err != nil {
-		log.Fatalf("Erreur lors de la création du proxy MITM: %v", err)
+		log.Fatal(err)
 	}
 
-	// Ajouter notre gestionnaire personnalisé
+	// Ajouter le gestionnaire MITM comme addon
 	p.AddAddon(handler)
 
-	// Configurer l'interface web si activée
-	if webInterface {
-		webOpts := &web.Options{
-			Addr: fmt.Sprintf(":%d", webPort),
-		}
-
-		log.Printf("Démarrage du proxy MITM avec interface web sur :%d", webPort)
-		log.Printf("Point de terminaison du logger: %s", loggerEndpoint)
-
-		// Démarrer l'interface web
-		webServer, err := web.NewWebAddOn(webOpts)
-		if err != nil {
-			log.Fatalf("Erreur lors de la création de l'interface web: %v", err)
-		}
-		p.AddAddon(webServer)
-	} else {
-		log.Printf("Démarrage du proxy MITM sur %s", opts.Addr)
-		log.Printf("Point de terminaison du logger: %s", loggerEndpoint)
-	}
-
-	// Démarrer le proxy
-	if err := p.Start(); err != nil {
-		log.Fatalf("Erreur lors du démarrage du proxy MITM: %v", err)
-	}
+	fmt.Printf("Proxy MITM démarré sur le port %d\n", config.WebPort)
+	log.Fatal(p.Start())
 }
 
 // Fonctions utilitaires pour les variables d'environnement
