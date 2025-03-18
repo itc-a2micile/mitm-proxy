@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/lqqyt2423/go-mitmproxy/proxy"
+	"github.com/lqqyt2423/go-mitmproxy/web"
 )
 
 // LogModel - Structure pour la journalisation des requêtes et réponses
@@ -42,6 +43,7 @@ type Config struct {
 	ExcludedRoutes []string
 	MaskHeaders    []string
 	WebInterface   bool
+	ProxyPort      int // Renommé de WebPort à ProxyPort pour plus de clarté
 	WebPort        int
 }
 
@@ -64,8 +66,11 @@ func NewMITMHandler(config Config) *MITMHandler {
 	if len(config.MaskHeaders) == 0 {
 		config.MaskHeaders = []string{"authorization", "password", "token", "api-key"}
 	}
+	if config.ProxyPort == 0 {
+		config.ProxyPort = 9080
+	}
 	if config.WebPort == 0 {
-		config.WebPort = 8081
+		config.WebPort = 9081
 	}
 
 	// Créer le client HTTP
@@ -288,7 +293,8 @@ func main() {
 		ExcludedRoutes: strings.Split(getEnv("EXCLUDED_ROUTES", ""), ","),
 		MaskHeaders:    strings.Split(getEnv("MASK_HEADERS", "authorization,password,token,api-key"), ","),
 		WebInterface:   getEnvBool("WEB_INTERFACE", true),
-		WebPort:        getEnvInt("WEB_PORT", 8081),
+		ProxyPort:      getEnvInt("PROXY_PORT", 9080),
+		WebPort:        getEnvInt("WEB_PORT", 9081),
 	}
 
 	// Créer le gestionnaire MITM
@@ -296,7 +302,7 @@ func main() {
 
 	// Configurer les options du proxy
 	opts := &proxy.Options{
-		Addr:              fmt.Sprintf(":%d", config.WebPort),
+		Addr:              fmt.Sprintf(":%d", config.ProxyPort),
 		StreamLargeBodies: 1024 * 1024, // 1MB
 	}
 
@@ -309,7 +315,15 @@ func main() {
 	// Ajouter le gestionnaire MITM comme addon
 	p.AddAddon(handler)
 
-	fmt.Printf("Proxy MITM démarré sur le port %d\n", config.WebPort)
+	// Configurer et démarrer l'interface web si activée
+	if config.WebInterface {
+		webAddr := fmt.Sprintf(":%d", config.WebPort)
+		webAddon := web.NewWebAddon(webAddr)
+		p.AddAddon(webAddon)
+		fmt.Printf("Interface web disponible sur http://localhost:%d\n", config.WebPort)
+	}
+
+	fmt.Printf("Proxy MITM démarré sur le port %d\n", config.ProxyPort)
 	log.Fatal(p.Start())
 }
 
